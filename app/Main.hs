@@ -8,7 +8,10 @@ import Control.Monad (replicateM, replicateM_)
 import Data.Attoparsec.Binary
 import Data.Attoparsec.ByteString (Parser, anyWord8, parseOnly)
 import Data.Attoparsec.ByteString.Char8 (anyChar, char)
+import Data.Bits ((.&.))
 import Data.ByteString (ByteString)
+import Data.Char (ord, toUpper)
+import Data.Foldable (foldl')
 import Data.Word (Word32)
 
 -- Amiga Disk Format (ADF)
@@ -169,3 +172,33 @@ rootBlockP =
         <*> anyWord32be
         <*> anyWord32be
         <*> anyWord32be
+
+{-
+#include<ctype.h>
+
+int HashName(unsigned char *name)
+{
+unsigned long hash, l;				/* sizeof(int)>=2 */
+int i;
+
+l=hash=strlen(name);
+for(i=0; i<l; i++) {
+        hash=hash*13;
+        hash=hash + toupper(name[i]);	/* not case sensitive */
+        hash=hash & 0x7ff;
+        }
+hash=hash % ((BSIZE/4)-56);		/* 0 < hash < 71
+                                         * in the case of 512 byte blocks */
+
+return(hash);
+}
+
+-}
+hashName :: String -> Word32
+hashName name =
+    foldl' hash (fromIntegral (length name)) values `mod` 72
+  where
+    values :: [Word32]
+    values = fmap (fromIntegral . ord . toUpper) name -- TODO use safe amiga intl toUpper
+    hash :: Word32 -> Word32 -> Word32
+    hash acc c = (acc * 13 + c) .&. 0x7ff
