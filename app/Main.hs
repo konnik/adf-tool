@@ -4,9 +4,11 @@ module Main where
 
 import Data.ByteString qualified as BS
 
+import Control.Monad (replicateM, replicateM_)
 import Data.Attoparsec.Binary
 import Data.Attoparsec.ByteString (Parser, anyWord8, parseOnly)
-import Data.Attoparsec.ByteString.Char8 (char)
+import Data.Attoparsec.ByteString.Char8 (anyChar, char)
+import Data.ByteString (ByteString)
 import Data.Word (Word32)
 
 -- Amiga Disk Format (ADF)
@@ -14,10 +16,22 @@ import Data.Word (Word32)
 
 main :: IO ()
 main = do
-    bytes <- BS.readFile "test.adf"
-
-    let result = parseOnly bootBlockP bytes
+    blocks <- blockify <$> BS.readFile "test.adf"
+    let result = parseOnly bootBlockP (head blocks)
     print result
+
+    let result2 = parseOnly rootBlockP (blocks !! 880)
+    print result2
+
+blockify :: ByteString -> [ByteString]
+blockify bytes =
+    if BS.length bytes == 0
+        then []
+        else
+            let
+                (a, rest) = BS.splitAt (fromIntegral cBSIZE) bytes
+             in
+                a : blockify rest
 
 {-
 Vocabulary
@@ -46,12 +60,6 @@ data BootBlock = BootBlock
     { bbFileSystem :: FileSystem
     , bbChecksum :: Word32
     , bbRootblock :: Word32
-    }
-    deriving (Show)
-
-data RootBlock = RootBlock
-    { rbType :: Word32
-    , rbDiskname :: String
     }
     deriving (Show)
 
@@ -97,3 +105,67 @@ bootBlockP = do
             , bbChecksum = cs
             , bbRootblock = rootblock
             }
+
+data RootBlock = RootBlock
+    { rbType :: Word32
+    , rbHeaderKey :: Word32
+    , rbHighSeq :: Word32
+    , rbHtSize :: Word32
+    , rbFirstData :: Word32
+    , rbCheckSum :: Word32
+    , rbHashTable :: [Word32]
+    , rbBmFlag :: Word32
+    , rbBmPages :: [Word32]
+    , rbBmExt :: Word32
+    , rbLastRootAlt :: DiskDate
+    , rbDiskname :: String
+    , rbLastDiskAlt :: DiskDate
+    , rbFsCreation :: DiskDate
+    , rbNextHash :: Word32
+    , rbParentDir :: Word32
+    , rbExtension :: Word32
+    , rbSecType :: Word32
+    }
+    deriving (Show)
+
+data DiskDate = DiskDate Word32 Word32 Word32 deriving (Show)
+
+diskNameP :: Parser String
+diskNameP = do
+    len <- anyWord8
+    name <- replicateM (fromIntegral len) anyChar
+
+    replicateM_ (30 - fromIntegral len) anyWord8
+
+    pure name
+
+diskDateP :: Parser DiskDate
+diskDateP =
+    DiskDate
+        <$> anyWord32be
+        <*> anyWord32be
+        <*> anyWord32be
+
+rootBlockP :: Parser RootBlock
+rootBlockP =
+    RootBlock
+        <$> anyWord32be
+        <*> anyWord32be
+        <*> anyWord32be
+        <*> anyWord32be
+        <*> anyWord32be
+        <*> anyWord32be
+        <*> replicateM 72 anyWord32be
+        <*> anyWord32be
+        <*> replicateM 25 anyWord32be
+        <*> anyWord32be
+        <*> diskDateP
+        <*> diskNameP
+        <* anyWord8 -- UNUSED 1 char,
+        <* (anyWord32be >> anyWord32be) -- UNUSED 2 ulong,
+        <*> diskDateP
+        <*> diskDateP
+        <*> anyWord32be
+        <*> anyWord32be
+        <*> anyWord32be
+        <*> anyWord32be
