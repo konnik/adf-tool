@@ -36,11 +36,11 @@ main = do
             case blockType raw of
                 FileHeaderBlockType -> do
                     let f = parseFileHeader raw
-                    print $ "File:     " ++ f.fileName ++ " (" ++ show f.fileSize ++ ")"
+                    putStrLn $ "File: " ++ f.fileName ++ " (" ++ show f.fileSize ++ " bytes)"
                 DirectoryBlockType -> do
-                    let d = parseFileDirectory raw
-                    print $ "Directory:" ++ show d
-                _ -> print "Nåt annat"
+                    -- let d = parseFileDirectory raw
+                    putStrLn $ "Dir:  "
+                _ -> putStrLn "Nåt annat"
 
 -- let fileBlocks = map (\x -> blocks !! fromIntegral x) $ filter (/= 0) result2.rbHashTable
 
@@ -87,16 +87,18 @@ getRawBlock disk blockIdx = disk.blocks !! fromIntegral blockIdx
 
 blockType :: RawBlock -> BlockType
 blockType rawBlock =
-    let lastFourBytes = BS.drop (cBSIZE - 4) rawBlock.bytes
+    let
+        lastFourBytes = BS.takeEnd 4 rawBlock.bytes
         secType = unwrap $ parseOnly ulong lastFourBytes
-     in case secType of
+     in
+        case secType of
             1 -> RootBlockType
             2 -> DirectoryBlockType
             3 -> SoftLinkBlockType
             4 -> HardLinkDirBlockType
             0xFFFFFFFC -> HardLinkFileBlockType
             0xFFFFFFFD -> FileHeaderBlockType
-            other -> error $ "Illegal sec_type: " ++ show other
+            other -> error $ "Can't determine block type because of unexpected value for sec_type: " ++ show other
 
 loadADF :: String -> IO Disk
 loadADF filename = do
