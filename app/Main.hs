@@ -16,10 +16,12 @@ import Data.ByteString (ByteString)
 import Data.Char (ord, toUpper)
 import Data.Foldable (foldl')
 import Data.Word (Word16, Word32)
+import Debug.Trace (traceShowId)
 import GHC.Base (when)
 
 -- Amiga Disk Format (ADF)
 -- http://lclevy.free.fr/adflib/adf_info.html
+-- https://github.com/lclevy/ADFlib/blob/master/src/adf_blk.h
 
 main :: IO ()
 main = do
@@ -30,16 +32,22 @@ main = do
     let root = parseRoot (getRawBlock disk 880)
     print root
 
+    let dir1 = parseDirectory (getRawBlock disk 882)
+    print dir1
+
+    putStrLn ""
+    putStrLn $ "Contents of " ++ disk.fileName ++ ":"
+    putStrLn ""
     forM_ root.rbHashTable $ \idx -> do
         when (idx /= 0) $ do
             let raw = getRawBlock disk idx
             case blockType raw of
                 FileHeaderBlockType -> do
                     let f = parseFileHeader raw
-                    putStrLn $ "File: " ++ f.fileName ++ " (" ++ show f.fileSize ++ " bytes)"
+                    putStrLn $ f.fileName ++ " (" ++ show f.fileSize ++ " bytes)"
                 DirectoryBlockType -> do
-                    -- let d = parseFileDirectory raw
-                    putStrLn $ "Dir:  "
+                    let d = parseDirectory raw
+                    putStrLn $ d.dirname ++ "/"
                 _ -> putStrLn "Nåt annat"
 
 -- let fileBlocks = map (\x -> blocks !! fromIntegral x) $ filter (/= 0) result2.rbHashTable
@@ -57,8 +65,9 @@ unwrap x = case x of
     Left err -> error $ "not Right: " ++ show err
 
 newtype RawBlock = RawBlock {bytes :: ByteString}
-newtype Disk = Disk
+data Disk = Disk
     { blocks :: [RawBlock]
+    , fileName :: String
     }
 
 data BlockType
@@ -79,8 +88,8 @@ parseRoot block = unwrap $ parseOnly rootBlockP block.bytes
 parseFileHeader :: RawBlock -> FileHeaderBlock
 parseFileHeader block = unwrap $ parseOnly fileHeaderBlockP block.bytes
 
-parseFileDirectory :: RawBlock -> DirectoryBlock
-parseFileDirectory block = unwrap $ parseOnly directoryBlockP block.bytes
+parseDirectory :: RawBlock -> DirectoryBlock
+parseDirectory block = unwrap $ parseOnly directoryBlockP block.bytes
 
 getRawBlock :: (Integral n) => Disk -> n -> RawBlock
 getRawBlock disk blockIdx = disk.blocks !! fromIntegral blockIdx
@@ -106,6 +115,7 @@ loadADF filename = do
     pure $
         Disk
             { blocks = blocks
+            , fileName = filename
             }
 
 blockTypeP :: Parser (Word32, Word32)
@@ -225,6 +235,9 @@ data DiskDate = DiskDate Word32 Word32 Word32 deriving (Show)
 stringP :: Int -> Parser String
 stringP maxlen = do
     len <- anyWord8
+
+    when (len > fromIntegral maxlen) $ fail $ "Invalid length. Max length is " ++ show maxlen ++ " but length was " ++ show len
+
     name <- replicateM (fromIntegral len) anyChar
 
     replicateM_ (maxlen - fromIntegral len) anyWord8
@@ -350,17 +363,22 @@ directoryBlockP :: Parser DirectoryBlock
 directoryBlockP = do
     _ <- word32be 2 -- T_HEADER = 2
     _headerKey <- ulong
-    unusedUlong 3
-    _checksum <- ulong
-    hashTable <- replicateM ((cBSIZE `div` 4) - 56) ulong
-    unusedUlong 2
-    uid <- ushort
-    gid <- ushort --- TODO ulong eller ushort????
-    _protect <- ulong
+    _highSeq <- ulong
+    _hashTableSize <- ulong
     unusedUlong 1
+
+    _checksum <- ulong
+    hashTable <- replicateM 72 ulong
+    unusedUlong 2
+
+    uid <- ushort
+    gid <- ushort
+    _protect <- ulong
+
     _comment <- stringP 79
     unusedChar 12
     _lastAccess <- diskDateP
+
     dirName <- stringP 30
     unusedChar 1
     unusedUlong 2
@@ -369,8 +387,8 @@ directoryBlockP = do
     hashChain <- ulong
     parent <- ulong
     _extension <- ulong
-    _secType <- ulong
 
+    _ <- word32be 2 -- should always be 2 for directory blocks
     pure $
         DirectoryBlock
             { hashTable = hashTable
@@ -419,8 +437,7 @@ fileHeaderBlockP = do
     hashChain <- ulong
     parent <- ulong
     _extension <- ulong
-    _secType <- ulong
-
+    _ <- word32be 0xFFFFFFFD -- always this value for file header blocks
     pure $
         FileHeaderBlock
             { highSeq = highSeq
