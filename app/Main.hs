@@ -7,7 +7,7 @@ module Main where
 
 import Data.ByteString qualified as BS
 
-import Control.Monad (replicateM, replicateM_)
+import Control.Monad (forM_, replicateM, replicateM_)
 import Data.Attoparsec.Binary
 import Data.Attoparsec.ByteString (Parser, anyWord8, parseOnly)
 import Data.Attoparsec.ByteString.Char8 (anyChar, char)
@@ -16,32 +16,95 @@ import Data.ByteString (ByteString)
 import Data.Char (ord, toUpper)
 import Data.Foldable (foldl')
 import Data.Word (Word16, Word32)
+import GHC.Base (when)
 
 -- Amiga Disk Format (ADF)
 -- http://lclevy.free.fr/adflib/adf_info.html
 
 main :: IO ()
 main = do
-    blocks <- blockify <$> BS.readFile "test.adf"
-    let result = parseOnly bootBlockP (head blocks)
+    disk <- loadADF "test.adf"
+    let result = parseOnly bootBlockP (getRawBlock disk 0).bytes
     print result
 
-    let result2 = unwrap $ parseOnly rootBlockP (blocks !! 880)
-    print result2
+    let root = parseRoot (getRawBlock disk 880)
+    print root
 
-    let fileBlocks = map (\x -> blocks !! fromIntegral x) $ filter (/= 0) result2.rbHashTable
+    forM_ root.rbHashTable $ \idx -> do
+        when (idx /= 0) $ do
+            let raw = getRawBlock disk idx
+            case blockType raw of
+                FileHeaderBlockType -> do
+                    let f = parseFileHeader raw
+                    print $ "File:     " ++ f.fileName ++ " (" ++ show f.fileSize ++ ")"
+                DirectoryBlockType -> do
+                    let d = parseFileDirectory raw
+                    print $ "Directory:" ++ show d
+                _ -> print "Nåt annat"
 
-    let result3 = fmap (unwrap . parseOnly blockTypeP) fileBlocks
-    print result3
+-- let fileBlocks = map (\x -> blocks !! fromIntegral x) $ filter (/= 0) result2.rbHashTable
+
+-- let result3 = fmap (unwrap . parseOnly blockTypeP) fileBlocks
+-- print result3
 
 -- contents :: [ByteString] -> [Word32] -> [ByteString]
 -- contents blocks hashTable =
 --     fmap (parseOnly Block) $ fmap (blocks !!) $ filter (/=0) hashTable
 
-unwrap :: Either a b -> b
+unwrap :: (Show err) => Either err a -> a
 unwrap x = case x of
-    Right b -> b
-    Left _ -> error "not Right"
+    Right a -> a
+    Left err -> error $ "not Right: " ++ show err
+
+newtype RawBlock = RawBlock {bytes :: ByteString}
+newtype Disk = Disk
+    { blocks :: [RawBlock]
+    }
+
+data BlockType
+    = RootBlockType
+    | DirectoryBlockType
+    | FileHeaderBlockType
+    | SoftLinkBlockType
+    | HardLinkFileBlockType
+    | HardLinkDirBlockType
+    deriving (Show)
+
+parseBoot :: RawBlock -> BootBlock
+parseBoot block = unwrap $ parseOnly bootBlockP block.bytes
+
+parseRoot :: RawBlock -> RootBlock
+parseRoot block = unwrap $ parseOnly rootBlockP block.bytes
+
+parseFileHeader :: RawBlock -> FileHeaderBlock
+parseFileHeader block = unwrap $ parseOnly fileHeaderBlockP block.bytes
+
+parseFileDirectory :: RawBlock -> DirectoryBlock
+parseFileDirectory block = unwrap $ parseOnly directoryBlockP block.bytes
+
+getRawBlock :: (Integral n) => Disk -> n -> RawBlock
+getRawBlock disk blockIdx = disk.blocks !! fromIntegral blockIdx
+
+blockType :: RawBlock -> BlockType
+blockType rawBlock =
+    let lastFourBytes = BS.drop (cBSIZE - 4) rawBlock.bytes
+        secType = unwrap $ parseOnly ulong lastFourBytes
+     in case secType of
+            1 -> RootBlockType
+            2 -> DirectoryBlockType
+            3 -> SoftLinkBlockType
+            4 -> HardLinkDirBlockType
+            0xFFFFFFFC -> HardLinkFileBlockType
+            0xFFFFFFFD -> FileHeaderBlockType
+            other -> error $ "Illegal sec_type: " ++ show other
+
+loadADF :: String -> IO Disk
+loadADF filename = do
+    blocks <- blockify <$> BS.readFile filename
+    pure $
+        Disk
+            { blocks = blocks
+            }
 
 blockTypeP :: Parser (Word32, Word32)
 blockTypeP = do
@@ -50,7 +113,7 @@ blockTypeP = do
     secType <- ulong
     pure (_type, secType)
 
-blockify :: ByteString -> [ByteString]
+blockify :: ByteString -> [RawBlock]
 blockify bytes =
     if BS.length bytes == 0
         then []
@@ -58,7 +121,7 @@ blockify bytes =
             let
                 (a, rest) = BS.splitAt (fromIntegral cBSIZE) bytes
              in
-                a : blockify rest
+                RawBlock a : blockify rest
 
 {-
 Vocabulary
