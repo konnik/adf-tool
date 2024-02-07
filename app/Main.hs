@@ -16,7 +16,6 @@ import Data.ByteString (ByteString)
 import Data.Char (ord, toUpper)
 import Data.Foldable (foldl')
 import Data.Word (Word16, Word32)
-import Debug.Trace (traceShowId)
 import GHC.Base (when)
 
 -- Amiga Disk Format (ADF)
