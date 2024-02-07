@@ -1,4 +1,7 @@
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE NoFieldSelectors #-}
 
 module Main where
 
@@ -12,7 +15,7 @@ import Data.Bits ((.&.))
 import Data.ByteString (ByteString)
 import Data.Char (ord, toUpper)
 import Data.Foldable (foldl')
-import Data.Word (Word32)
+import Data.Word (Word16, Word32)
 
 -- Amiga Disk Format (ADF)
 -- http://lclevy.free.fr/adflib/adf_info.html
@@ -23,8 +26,29 @@ main = do
     let result = parseOnly bootBlockP (head blocks)
     print result
 
-    let result2 = parseOnly rootBlockP (blocks !! 880)
+    let result2 = unwrap $ parseOnly rootBlockP (blocks !! 880)
     print result2
+
+    let fileBlocks = map (\x -> blocks !! fromIntegral x) $ filter (/= 0) result2.rbHashTable
+
+    let result3 = fmap (unwrap . parseOnly blockTypeP) fileBlocks
+    print result3
+
+-- contents :: [ByteString] -> [Word32] -> [ByteString]
+-- contents blocks hashTable =
+--     fmap (parseOnly Block) $ fmap (blocks !!) $ filter (/=0) hashTable
+
+unwrap :: Either a b -> b
+unwrap x = case x of
+    Right b -> b
+    Left _ -> error "not Right"
+
+blockTypeP :: Parser (Word32, Word32)
+blockTypeP = do
+    _type <- ulong
+    unusedUlong (128 - 2)
+    secType <- ulong
+    pure (_type, secType)
 
 blockify :: ByteString -> [ByteString]
 blockify bytes =
@@ -51,11 +75,11 @@ to the start of a physical media. If a volume starts at the #0 physical sector, 
 like with floppies.
 -}
 
-cBSIZE :: Word32
+cBSIZE :: Int
 cBSIZE = 512
-cROOTBLOCK_DD :: Word32
+cROOTBLOCK_DD :: Int
 cROOTBLOCK_DD = 880
-cROOTBLOCK_HD :: Word32
+cROOTBLOCK_HD :: Int
 cROOTBLOCK_HD = 1760
 
 data FileSystem = OFS | FFS | OFS_INTL | FFS_INTL | OFS_DIRC_INTL | FFS_DIRC_INTL deriving (Show)
@@ -133,12 +157,12 @@ data RootBlock = RootBlock
 
 data DiskDate = DiskDate Word32 Word32 Word32 deriving (Show)
 
-diskNameP :: Parser String
-diskNameP = do
+stringP :: Int -> Parser String
+stringP maxlen = do
     len <- anyWord8
     name <- replicateM (fromIntegral len) anyChar
 
-    replicateM_ (30 - fromIntegral len) anyWord8
+    replicateM_ (maxlen - fromIntegral len) anyWord8
 
     pure name
 
@@ -163,7 +187,7 @@ rootBlockP =
         <*> replicateM 25 anyWord32be
         <*> anyWord32be
         <*> diskDateP
-        <*> diskNameP
+        <*> stringP 30
         <* anyWord8 -- UNUSED 1 char,
         <* (anyWord32be >> anyWord32be) -- UNUSED 2 ulong,
         <*> diskDateP
@@ -172,6 +196,176 @@ rootBlockP =
         <*> anyWord32be
         <*> anyWord32be
         <*> anyWord32be
+
+data DirectoryBlock = DirectoryBlock
+    { hashTable :: [Word32]
+    , uid :: Word16
+    , gid :: Word16
+    , dirname :: String
+    , nextLink :: Word32
+    , hashChain :: Word32
+    , parent :: Word32
+    }
+    deriving (Show)
+
+{-
+\* User directory block (BSIZE bytes)
+------------------------------------------------------------------------------------------------
+        0/ 0x00	ulong	1	type		block primary type = T_HEADER (value 2)
+        4/ 0x04	ulong	1	header_key	self pointer
+	8/ 0x08	ulong 	3 	UNUSED		unused (== 0)
+       20/ 0x14	ulong	1	chksum		normal checksum algorithm
+       24/ 0x18	ulong	*	ht[]		hash table (entry block number)
+        	                                * = (BSIZE/4) - 56
+                	                        for floppy disk: size= 72 longwords
+BSIZE-200/-0xc8	ulong	2	UNUSED		unused (== 0)
+BSIZE-196/-0xc8	ushort	1 	UID 		User ID
+BSIZE-194/-0xc8	ulong	1	GID		Group ID
+BSIZE-192/-0xc0	ulong	1	protect		protection flags (set to 0 by default)
+
+                                        Bit     If set, means
+
+                                           If MultiUser FileSystem : Owner
+					0	delete forbidden (D)
+					1	not executable (E)
+					2	not writable (W)
+					3	not readable (R)
+
+					4	is archived (A)
+					5	pure (reetrant safe), can be made resident (P)
+					6	file is a script (Arexx or Shell) (S)
+					7	Hold bit. if H+P (and R+E) are set the file
+                                                 can be made resident on first load (OS 2.x and 3.0)
+
+                                        8       Group (D) : is delete protected
+                                        9       Group (E) : is executable
+                                       10       Group (W) : is writable
+                                       11       Group (R) : is readable
+
+                                       12       Other (D) : is delete protected
+                                       13       Other (E) : is executable
+                                       14       Other (W) : is writable
+                                       15       Other (R) : is readable
+                                    30-16	reserved
+				       31	SUID, MultiUserFS Only
+
+BSIZE-188/-0xbc	ulong	1	UNUSED		unused (== 0)
+BSIZE-184/-0xb8	char	1	comm_len	directory comment length
+BSIZE-183/-0xb7	char	79	comment[]	comment (max. 79 chars permitted)
+BSIZE-104/-0x69	char	12	UNUSED		set to 0
+BSIZE- 92/-0x5c	ulong	1	days		last access date (days since 1 jan 78)
+BSIZE- 88/-0x58	ulong	1	mins		last access time
+BSIZE- 84/-0x54	ulong	1	ticks		in 1/50s of a seconds
+BSIZE- 80/-0x50	char	1	name_len	directory name length
+BSIZE- 79/-0x4f char	30	dirname[]	directory (max. 30 chars permitted)
+BSIZE- 49/-0x31 char	1	UNUSED		set to 0
+BSIZE- 48/-0x30 ulong	2	UNUSED		set to 0
+BSIZE- 40/-0x28	ulong	1	next_link	FFS : hardlinks chained list (first=newest)
+BSIZE- 36/-0x24	ulong	5	UNUSED		set to 0
+BSIZE- 16/-0x10	ulong	1	hash_chain	next entry ptr with same hash
+BSIZE- 12/-0x0c	ulong	1	parent		parent directory
+BSIZE-  8/-0x08	ulong	1	extension	FFS : first directory cache block
+BSIZE-  4/-0x04	ulong	1	sec_type	secondary type : ST_USERDIR (== 2)
+------------------------------------------------------------------------------------------------
+-}
+
+ulong :: Parser Word32
+ulong = anyWord32be
+
+ushort :: Parser Word16
+ushort = anyWord16be
+
+unusedUlong :: Int -> Parser ()
+unusedUlong n = replicateM_ n ulong
+
+unusedChar :: Int -> Parser ()
+unusedChar n = replicateM_ n anyWord8
+
+directoryBlockP :: Parser DirectoryBlock
+directoryBlockP = do
+    _ <- word32be 2 -- T_HEADER = 2
+    _headerKey <- ulong
+    unusedUlong 3
+    _checksum <- ulong
+    hashTable <- replicateM ((cBSIZE `div` 4) - 56) ulong
+    unusedUlong 2
+    uid <- ushort
+    gid <- ushort --- TODO ulong eller ushort????
+    _protect <- ulong
+    unusedUlong 1
+    _comment <- stringP 79
+    unusedChar 12
+    _lastAccess <- diskDateP
+    dirName <- stringP 30
+    unusedChar 1
+    unusedUlong 2
+    nextLink <- ulong
+    unusedUlong 5
+    hashChain <- ulong
+    parent <- ulong
+    _extension <- ulong
+    _secType <- ulong
+
+    pure $
+        DirectoryBlock
+            { hashTable = hashTable
+            , uid = uid
+            , gid = gid
+            , dirname = dirName
+            , nextLink = nextLink
+            , hashChain = hashChain
+            , parent = parent
+            }
+
+data FileHeaderBlock = FileHeaderBlock
+    { highSeq :: Word32
+    , firstData :: Word32
+    , dataBlocks :: [Word32]
+    , fileSize :: Word32
+    , fileName :: String
+    , hashChain :: Word32
+    , parent :: Word32
+    }
+    deriving (Show)
+
+fileHeaderBlockP :: Parser FileHeaderBlock
+fileHeaderBlockP = do
+    _type <- word32be 2
+    _headerKey <- ulong
+    highSeq <- ulong
+    _dataSize <- ulong
+    firstData <- ulong
+    _checksum <- ulong
+    dataBlocks <- replicateM ((cBSIZE `div` 4) - 56) ulong
+    unusedUlong 1
+    _uid <- ushort
+    _gid <- ushort
+    _protect <- ulong
+    fileSize <- ulong
+    _comment <- stringP 79
+    unusedChar 12
+    _lastChange <- diskDateP
+    fileName <- stringP 30
+    unusedChar 1
+    unusedUlong 1
+    _realEntry <- ulong
+    _nextLink <- ulong
+    unusedUlong 5
+    hashChain <- ulong
+    parent <- ulong
+    _extension <- ulong
+    _secType <- ulong
+
+    pure $
+        FileHeaderBlock
+            { highSeq = highSeq
+            , firstData = firstData
+            , dataBlocks = dataBlocks
+            , fileSize = fileSize
+            , fileName = fileName
+            , hashChain = hashChain
+            , parent = parent
+            }
 
 {-
 #include<ctype.h>
