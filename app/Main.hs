@@ -26,7 +26,9 @@ import GHC.Base (when)
 
 main :: IO ()
 main = do
+    -- disk <- loadADF "test.adf"
     disk <- loadADF "AttackPETSCIIRobots_img.adf"
+    -- disk <- loadADF "Gigatron-BosniskMetall.adf"
     let root = parseRoot (getRawBlock disk (BlockPtr 880))
     let tree = dirTree disk "" root.rbHashTable
     putStrLn ""
