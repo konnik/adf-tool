@@ -2,6 +2,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE NoFieldSelectors #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 module Main where
 
@@ -15,6 +16,7 @@ import Data.Bits ((.&.))
 import Data.ByteString (ByteString)
 import Data.Char (ord, toUpper)
 import Data.Foldable (foldl')
+import Data.Maybe (catMaybes)
 import Data.Word (Word16, Word32)
 import GHC.Base (when)
 
@@ -25,29 +27,20 @@ import GHC.Base (when)
 main :: IO ()
 main = do
     disk <- loadADF "test.adf"
-    let result = parseOnly bootBlockP (getRawBlock disk 0).bytes
+    let result = parseOnly bootBlockP (getRawBlock disk (BlockPtr 0)).bytes
     print result
 
-    let root = parseRoot (getRawBlock disk 880)
+    let root = parseRoot (getRawBlock disk (BlockPtr 880))
     print root
-
-    let dir1 = parseDirectory (getRawBlock disk 882)
-    print dir1
 
     putStrLn ""
     putStrLn $ "Contents of " ++ disk.fileName ++ ":"
     putStrLn ""
-    forM_ root.rbHashTable $ \idx -> do
-        when (idx /= 0) $ do
-            let raw = getRawBlock disk idx
-            case blockType raw of
-                FileHeaderBlockType -> do
-                    let f = parseFileHeader raw
-                    putStrLn $ f.fileName ++ " (" ++ show f.fileSize ++ " bytes)"
-                DirectoryBlockType -> do
-                    let d = parseDirectory raw
-                    putStrLn $ d.dirname ++ "/"
-                _ -> putStrLn "Nåt annat"
+    forM_ (dirRoot disk) $ \case
+        FileEntry f -> do
+            putStrLn $ f.fileName ++ " (" ++ show f.fileSize ++ " bytes)"
+        DirEntry d -> do
+            putStrLn $ d.dirname ++ "/"
 
 -- let fileBlocks = map (\x -> blocks !! fromIntegral x) $ filter (/= 0) result2.rbHashTable
 
@@ -69,6 +62,30 @@ data Disk = Disk
     , fileName :: String
     }
 
+data Entry = FileEntry FileHeaderBlock | DirEntry DirectoryBlock
+
+newtype BlockPtr = BlockPtr Word32 deriving (Show)
+
+dirRoot :: Disk -> [Entry]
+dirRoot disk = do
+    let root = parseRoot $ getRawBlock disk (BlockPtr 880)
+    e <- catMaybes root.rbHashTable
+    filesInChain disk e
+
+filesInChain :: Disk -> BlockPtr -> [Entry]
+filesInChain disk ptr =
+    case nextInChain entry of
+        Just nextPtr -> entry : filesInChain disk nextPtr
+        Nothing -> [entry]
+  where
+    entry = getEntry disk ptr
+
+nextInChain :: Entry -> Maybe BlockPtr
+nextInChain entry =
+    case entry of
+        FileEntry f -> f.hashChain
+        DirEntry d -> d.hashChain
+
 data BlockType
     = RootBlockType
     | DirectoryBlockType
@@ -77,6 +94,16 @@ data BlockType
     | HardLinkFileBlockType
     | HardLinkDirBlockType
     deriving (Show)
+
+getEntry :: Disk -> BlockPtr -> Entry
+getEntry disk ptr =
+    case blkType of
+        DirectoryBlockType -> DirEntry $ parseDirectory rawBlk
+        FileHeaderBlockType -> FileEntry $ parseFileHeader rawBlk
+        _ -> error $ "Invalid block type for entry: " ++ show blkType
+  where
+    rawBlk = getRawBlock disk ptr
+    blkType = blockType rawBlk
 
 parseBoot :: RawBlock -> BootBlock
 parseBoot block = unwrap $ parseOnly bootBlockP block.bytes
@@ -90,8 +117,8 @@ parseFileHeader block = unwrap $ parseOnly fileHeaderBlockP block.bytes
 parseDirectory :: RawBlock -> DirectoryBlock
 parseDirectory block = unwrap $ parseOnly directoryBlockP block.bytes
 
-getRawBlock :: (Integral n) => Disk -> n -> RawBlock
-getRawBlock disk blockIdx = disk.blocks !! fromIntegral blockIdx
+getRawBlock :: Disk -> BlockPtr -> RawBlock
+getRawBlock disk (BlockPtr ptr) = disk.blocks !! fromIntegral ptr
 
 blockType :: RawBlock -> BlockType
 blockType rawBlock =
@@ -214,7 +241,7 @@ data RootBlock = RootBlock
     , rbHtSize :: Word32
     , rbFirstData :: Word32
     , rbCheckSum :: Word32
-    , rbHashTable :: [Word32]
+    , rbHashTable :: [Maybe BlockPtr]
     , rbBmFlag :: Word32
     , rbBmPages :: [Word32]
     , rbBmExt :: Word32
@@ -259,7 +286,7 @@ rootBlockP =
         <*> anyWord32be
         <*> anyWord32be
         <*> anyWord32be
-        <*> replicateM 72 anyWord32be
+        <*> replicateM 72 maybeBlockPtrP
         <*> anyWord32be
         <*> replicateM 25 anyWord32be
         <*> anyWord32be
@@ -275,13 +302,13 @@ rootBlockP =
         <*> anyWord32be
 
 data DirectoryBlock = DirectoryBlock
-    { hashTable :: [Word32]
+    { hashTable :: [Maybe BlockPtr]
     , uid :: Word16
     , gid :: Word16
     , dirname :: String
-    , nextLink :: Word32
-    , hashChain :: Word32
-    , parent :: Word32
+    , nextLink :: Maybe BlockPtr
+    , hashChain :: Maybe BlockPtr
+    , parent :: BlockPtr
     }
     deriving (Show)
 
@@ -358,6 +385,16 @@ unusedUlong n = replicateM_ n ulong
 unusedChar :: Int -> Parser ()
 unusedChar n = replicateM_ n anyWord8
 
+blockPtrP :: Parser BlockPtr
+blockPtrP = BlockPtr <$> ulong
+
+maybeBlockPtrP :: Parser (Maybe BlockPtr)
+maybeBlockPtrP = do
+    ptr <- ulong
+    pure $ case ptr of
+        0 -> Nothing
+        _ -> Just (BlockPtr ptr)
+
 directoryBlockP :: Parser DirectoryBlock
 directoryBlockP = do
     _ <- word32be 2 -- T_HEADER = 2
@@ -367,7 +404,7 @@ directoryBlockP = do
     unusedUlong 1
 
     _checksum <- ulong
-    hashTable <- replicateM 72 ulong
+    hashTable <- replicateM 72 maybeBlockPtrP
     unusedUlong 2
 
     uid <- ushort
@@ -381,10 +418,10 @@ directoryBlockP = do
     dirName <- stringP 30
     unusedChar 1
     unusedUlong 2
-    nextLink <- ulong
+    nextLink <- maybeBlockPtrP
     unusedUlong 5
-    hashChain <- ulong
-    parent <- ulong
+    hashChain <- maybeBlockPtrP
+    parent <- blockPtrP
     _extension <- ulong
 
     _ <- word32be 2 -- should always be 2 for directory blocks
@@ -405,7 +442,7 @@ data FileHeaderBlock = FileHeaderBlock
     , dataBlocks :: [Word32]
     , fileSize :: Word32
     , fileName :: String
-    , hashChain :: Word32
+    , hashChain :: Maybe BlockPtr
     , parent :: Word32
     }
     deriving (Show)
@@ -433,7 +470,7 @@ fileHeaderBlockP = do
     _realEntry <- ulong
     _nextLink <- ulong
     unusedUlong 5
-    hashChain <- ulong
+    hashChain <- maybeBlockPtrP
     parent <- ulong
     _extension <- ulong
     _ <- word32be 0xFFFFFFFD -- always this value for file header blocks
