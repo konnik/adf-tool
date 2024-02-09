@@ -2,12 +2,15 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE NoFieldSelectors #-}
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 module Main where
 
 import Data.ByteString qualified as BS
 
+import Adf.Constants (cBSIZE)
+import Adf.Parsers (blockPtrP, maybeBlockPtrP, ulong, unusedChar, unusedUlong, ushort)
+import Adf.Types
+import Adf.Util (unwrap)
 import Control.Monad (forM_, replicateM, replicateM_)
 import Data.Attoparsec.Binary
 import Data.Attoparsec.ByteString (Parser, anyWord8, parseOnly)
@@ -58,17 +61,6 @@ ppTree indentLevel (DirNode dirName dirs files) = do
     pp2 str = putStrLn (prefix ++ "  " ++ str)
     prefix = replicate indentLevel ' '
 
-unwrap :: (Show err) => Either err a -> a
-unwrap x = case x of
-    Right a -> a
-    Left err -> error $ "Unwrap failed: " ++ show err
-
-newtype RawBlock = RawBlock {bytes :: ByteString}
-data Disk = Disk
-    { blocks :: [RawBlock]
-    , fileName :: String
-    }
-
 class NamedDirectory a where
     dirName :: a -> String
     dirEntries :: Disk -> a -> [Entry]
@@ -82,8 +74,6 @@ instance NamedDirectory RootBlock where
     dirEntries disk root = dirDir disk root.hashTable
 
 data Entry = FileEntry FileHeaderBlock | DirEntry DirectoryBlock
-
-newtype BlockPtr = BlockPtr Word32 deriving (Show)
 
 data DirTree = DirNode String [DirTree] [FileHeaderBlock] deriving (Show)
 
@@ -147,9 +137,6 @@ getEntry disk ptr =
   where
     rawBlk = getRawBlock disk ptr
     blkType = blockType rawBlk
-
-parseBoot :: RawBlock -> BootBlock
-parseBoot block = unwrap $ parseOnly bootBlockP block.bytes
 
 parseRoot :: RawBlock -> RootBlock
 parseRoot block = unwrap $ parseOnly rootBlockP block.bytes
@@ -218,64 +205,6 @@ There are 'logical' and 'physical' block pointers. 'Logical' ones are related to
 to the start of a physical media. If a volume starts at the #0 physical sector, a physical pointer and a logical pointer is the same thing,
 like with floppies.
 -}
-
-cBSIZE :: Int
-cBSIZE = 512
-cROOTBLOCK_DD :: Int
-cROOTBLOCK_DD = 880
-cROOTBLOCK_HD :: Int
-cROOTBLOCK_HD = 1760
-
-data FileSystem = OFS | FFS | OFS_INTL | FFS_INTL | OFS_DIRC_INTL | FFS_DIRC_INTL deriving (Show)
-data BootBlock = BootBlock
-    { bbFileSystem :: FileSystem
-    , bbChecksum :: Word32
-    , bbRootblock :: Word32
-    }
-    deriving (Show)
-
-{-
-\* BootBlock
--------------------------------------------------------------------------------
-offset  size    number  name            meaning
--------------------------------------------------------------------------------
-0/0x00  char    4       DiskType        'D''O''S' + flags
-                                        flags = 3 least signifiant bits
-                                               set         clr
-                                          0    FFS         OFS
-                                          1    INTL ONLY   NO_INTL ONLY
-                                          2    DIRC&INTL   NO_DIRC&INTL
-4/0x04  ulong   1       Chksum          special block checksum
-8/0x08  ulong   1       Rootblock       Value is 880 for DD and HD
-                                        (yes, the 880 value is strange for HD)
-12/0x0c char    *       Bootblock code  (see 5.2 'Bootable disk' for more info)
-                                        The size for a floppy disk is 1012,
-                                        for a harddisk it is
-                                        (DosEnvVec->Bootblocks * BSIZE) - 12
--------------------------------------------------------------------------------
--}
-bootBlockP :: Parser BootBlock
-bootBlockP = do
-    _ <- char 'D' >> char 'O' >> char 'S'
-    fs <-
-        anyWord8 >>= \case
-            0 -> pure OFS
-            1 -> pure FFS
-            2 -> pure OFS_INTL
-            3 -> pure FFS_INTL
-            4 -> pure OFS_DIRC_INTL
-            5 -> pure FFS_DIRC_INTL
-            invalid -> fail $ "Invald flag configuration: " ++ show invalid
-
-    cs <- anyWord32be
-    rootblock <- anyWord32be
-
-    pure $
-        BootBlock
-            { bbFileSystem = fs
-            , bbChecksum = cs
-            , bbRootblock = rootblock
-            }
 
 data RootBlock = RootBlock
     { headerKey :: Word32
@@ -414,28 +343,6 @@ BSIZE-  8/-0x08	ulong	1	extension	FFS : first directory cache block
 BSIZE-  4/-0x04	ulong	1	sec_type	secondary type : ST_USERDIR (== 2)
 ------------------------------------------------------------------------------------------------
 -}
-
-ulong :: Parser Word32
-ulong = anyWord32be
-
-ushort :: Parser Word16
-ushort = anyWord16be
-
-unusedUlong :: Int -> Parser ()
-unusedUlong n = replicateM_ n ulong
-
-unusedChar :: Int -> Parser ()
-unusedChar n = replicateM_ n anyWord8
-
-blockPtrP :: Parser BlockPtr
-blockPtrP = BlockPtr <$> ulong
-
-maybeBlockPtrP :: Parser (Maybe BlockPtr)
-maybeBlockPtrP = do
-    ptr <- ulong
-    pure $ case ptr of
-        0 -> Nothing
-        _ -> Just (BlockPtr ptr)
 
 directoryBlockP :: Parser DirectoryBlock
 directoryBlockP = do
