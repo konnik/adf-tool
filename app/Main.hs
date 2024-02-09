@@ -52,7 +52,7 @@ ppTree indentLevel (DirNode dirName dirs files) = do
         ppTree (indentLevel + 2) d
 
     forM_ files $ \f -> do
-        pp2 f
+        pp2 (f.fileName ++ " : high_seq=" ++ show f.dataBlocks ++ ", extension=" ++ show f.extension ++ ", firstData=" ++ show f.firstData)
   where
     pp str = putStrLn (prefix ++ str)
     pp2 str = putStrLn (prefix ++ "  " ++ str)
@@ -61,7 +61,7 @@ ppTree indentLevel (DirNode dirName dirs files) = do
 unwrap :: (Show err) => Either err a -> a
 unwrap x = case x of
     Right a -> a
-    Left err -> error $ "not Right: " ++ show err
+    Left err -> error $ "Unwrap failed: " ++ show err
 
 newtype RawBlock = RawBlock {bytes :: ByteString}
 data Disk = Disk
@@ -73,11 +73,11 @@ data Entry = FileEntry FileHeaderBlock | DirEntry DirectoryBlock
 
 newtype BlockPtr = BlockPtr Word32 deriving (Show)
 
-data DirTree = DirNode String [DirTree] [String] deriving (Show)
+data DirTree = DirNode String [DirTree] [FileHeaderBlock] deriving (Show)
 
 dirTree :: Disk -> String -> [Maybe BlockPtr] -> DirTree
 dirTree disk dirName hashTable =
-    DirNode dirName (fmap subTree dirs) (fmap (\f -> f.fileName) files)
+    DirNode dirName (fmap subTree dirs) files
   where
     entries = dirDir disk hashTable
     files = mapMaybe entryAsFile entries
@@ -478,6 +478,7 @@ data FileHeaderBlock = FileHeaderBlock
     , fileName :: String
     , hashChain :: Maybe BlockPtr
     , parent :: Word32
+    , extension :: Maybe BlockPtr
     }
     deriving (Show)
 
@@ -506,7 +507,7 @@ fileHeaderBlockP = do
     unusedUlong 5
     hashChain <- maybeBlockPtrP
     parent <- ulong
-    _extension <- ulong
+    extension <- maybeBlockPtrP
     _ <- word32be 0xFFFFFFFD -- always this value for file header blocks
     pure $
         FileHeaderBlock
@@ -517,6 +518,7 @@ fileHeaderBlockP = do
             , fileName = fileName
             , hashChain = hashChain
             , parent = parent
+            , extension = extension
             }
 
 {-
