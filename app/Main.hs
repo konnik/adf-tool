@@ -30,7 +30,7 @@ main = do
     disk <- loadADF "AttackPETSCIIRobots_img.adf"
     -- disk <- loadADF "Gigatron-BosniskMetall.adf"
     let root = parseRoot (getRawBlock disk (BlockPtr 880))
-    let tree = dirTree disk "" root.rbHashTable
+    let tree = dirTree disk root
     putStrLn ""
     putStrLn $ "Contents of " ++ disk.fileName ++ ":"
     putStrLn ""
@@ -69,22 +69,31 @@ data Disk = Disk
     , fileName :: String
     }
 
+class NamedDirectory a where
+    dirName :: a -> String
+    dirEntries :: Disk -> a -> [Entry]
+
+instance NamedDirectory DirectoryBlock where
+    dirName dir = dir.dirname
+    dirEntries disk dir = dirDir disk dir.hashTable
+
+instance NamedDirectory RootBlock where
+    dirName root = root.diskname ++ ":/"
+    dirEntries disk root = dirDir disk root.hashTable
+
 data Entry = FileEntry FileHeaderBlock | DirEntry DirectoryBlock
 
 newtype BlockPtr = BlockPtr Word32 deriving (Show)
 
 data DirTree = DirNode String [DirTree] [FileHeaderBlock] deriving (Show)
 
-dirTree :: Disk -> String -> [Maybe BlockPtr] -> DirTree
-dirTree disk dirName hashTable =
-    DirNode dirName (fmap subTree dirs) files
+dirTree :: (NamedDirectory a) => Disk -> a -> DirTree
+dirTree disk dir =
+    DirNode (dirName dir) (fmap (dirTree disk) dirs) files
   where
-    entries = dirDir disk hashTable
+    entries = dirEntries disk dir
     files = mapMaybe entryAsFile entries
     dirs = mapMaybe entryAsDir entries
-
-    subTree :: DirectoryBlock -> DirTree
-    subTree dir = dirTree disk dir.dirname dir.hashTable
 
 entryAsFile :: Entry -> Maybe FileHeaderBlock
 entryAsFile = \case
@@ -99,7 +108,7 @@ entryAsDir = \case
 dirRoot :: Disk -> [Entry]
 dirRoot disk = do
     let root = parseRoot $ getRawBlock disk (BlockPtr 880)
-    dirDir disk root.rbHashTable
+    dirDir disk root.hashTable
 
 dirDir :: Disk -> [Maybe BlockPtr] -> [Entry]
 dirDir disk hashTable = do
@@ -269,24 +278,23 @@ bootBlockP = do
             }
 
 data RootBlock = RootBlock
-    { rbType :: Word32
-    , rbHeaderKey :: Word32
-    , rbHighSeq :: Word32
-    , rbHtSize :: Word32
-    , rbFirstData :: Word32
-    , rbCheckSum :: Word32
-    , rbHashTable :: [Maybe BlockPtr]
-    , rbBmFlag :: Word32
-    , rbBmPages :: [Word32]
-    , rbBmExt :: Word32
-    , rbLastRootAlt :: DiskDate
-    , rbDiskname :: String
-    , rbLastDiskAlt :: DiskDate
-    , rbFsCreation :: DiskDate
-    , rbNextHash :: Word32
-    , rbParentDir :: Word32
-    , rbExtension :: Word32
-    , rbSecType :: Word32
+    { headerKey :: Word32
+    , highSeq :: Word32
+    , htSize :: Word32
+    , firstData :: Word32
+    , checkSum :: Word32
+    , hashTable :: [Maybe BlockPtr]
+    , bmFlag :: Word32
+    , bmPages :: [Word32]
+    , bmExt :: Word32
+    , lastRootAlt :: DiskDate
+    , diskname :: String
+    , lastDiskAlt :: DiskDate
+    , fsCreation :: DiskDate
+    , nextHash :: Word32
+    , parentDir :: Word32
+    , extension :: Word32
+    , secType :: Word32
     }
     deriving (Show)
 
@@ -314,7 +322,7 @@ diskDateP =
 rootBlockP :: Parser RootBlock
 rootBlockP =
     RootBlock
-        <$> anyWord32be
+        <$ unusedUlong 1
         <*> anyWord32be
         <*> anyWord32be
         <*> anyWord32be
